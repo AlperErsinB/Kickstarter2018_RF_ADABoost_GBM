@@ -1,0 +1,250 @@
+import os
+from warnings import filterwarnings
+from pickle import dump, load
+filterwarnings('ignore', message='numpy.dtype size changed')
+filterwarnings('ignore', message='Using a non-tuple sequence for multidimensional indexing is deprecated')
+filterwarnings('ignore', message='numpy.core.umath_tests is an internal NumPy module and should not be imported')
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from sklearn.feature_selection import RFE, SelectKBest, chi2
+from sklearn.model_selection import train_test_split, KFold, cross_val_score, GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.metrics import confusion_matrix, accuracy_score
+from sklearn.pipeline import Pipeline
+
+
+
+
+# Understanding data types
+df = pd.read_csv('ks_df.csv', parse_dates=[5, 7])
+df.dtypes
+
+
+
+# renaming and deleting unnecessary columns
+clean = df.drop(columns=['usd pledged', 'ID', 'goal'])
+clean.rename(columns={'usd_pledged_real':'pledged_usd', 'usd_goal_real':'goal_usd'}, inplace=True)
+
+
+
+# Let's look at the state
+clean.groupby('state').size().sort_values(ascending=False)
+
+
+
+clean = clean[clean.state.isin(['successful', 'failed', 'canceled'])]
+clean.state = clean.state.replace({'successful':1, 'failed':0, 'canceled':0})
+clean.drop(columns=['pledged', 'backers', 'pledged_usd'], inplace=True)
+
+
+
+clean['launch_day'] = [d.date() for d in clean.launched]
+clean['launch_time'] = [d.time() for d in clean.launched]
+clean[['h', 'm', 's']] = clean.launch_time.astype(str).str.split(':', expand=True).astype(float)
+clean['launch_time'] = clean.h.values + clean.m.values / 60 + clean.s.values / 3600
+clean.drop(columns=['h', 'm', 's'], inplace=True)
+clean['duration'] = [(d - l).days for d, l in zip(clean.deadline.dt.date, clean.launch_day)]
+clean.drop(columns='launched', inplace=True)
+
+fig = plt.figure()
+plt.hist(clean.duration)
+plt.xlabel('Project Duration (Days)')
+plt.ylabel('Count')
+plt.show()
+
+
+
+cols = list(clean.columns)
+cols.append(cols.pop(cols.index('state')))
+clean = clean.reindex(columns=cols)
+clean.to_csv('kickstarter-clean.csv', index=False)
+
+
+
+clean = pd.read_csv('ks_df.csv')
+
+
+
+main_categories = clean.groupby('main_category').size().sort_values(ascending=False)
+n_main = [i / 1000 for i in list(main_categories)]
+labels_main = list(main_categories.index)
+
+ind = np.arange(len(main_categories))
+plt.bar(ind, n_main)
+plt.ylabel('Count (Thousands)')
+plt.xlabel('Main Category')
+plt.title('Kickstarter Project Categories')
+plt.xticks(ind, labels_main, rotation=90)
+plt.show()
+
+
+clean = pd.read_csv('kickstarter-clean.csv', parse_dates=[4, 7])
+transformed = clean
+transformed.launch_day = [np.cos(d.timetuple().tm_yday / 365 * 2 * np.pi) for d in clean.launch_day] 
+transformed.deadline = [np.cos(d.timetuple().tm_yday / 365 * 2 * np.pi) for d in clean.deadline]
+transformed.launch_time = np.cos(clean.launch_time.astype('float') / 24 * 2 * np.pi)
+
+
+#For one-hot-encoding I used pandas-get_dummies
+# I want to see it in the output to check if the variable types are numeric.
+transformed.drop(columns='currency', inplace=True)
+transformed.name = clean.name.str.len()
+transformed.dropna(inplace=True) # Some strings returned NA
+transformed = pd.get_dummies(transformed)
+transformed.dtypes
+
+
+print(transformed.corr().unstack().sort_values().drop_duplicates())
+transformed.drop(columns=['deadline', 'category_Theater', 'category_Product Design'], inplace=True)
+
+
+cols = list(transformed.columns)
+cols.append(cols.pop(cols.index('state')))
+transformed = transformed.reindex(columns=cols)
+
+
+seed = 1234
+y = transformed.state.values
+x = transformed.values[:, :-1]
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=seed)
+print(x.shape)
+
+
+selector = RandomForestClassifier(random_state=seed)
+selector.fit(x_train, y_train)
+importance = selector.feature_importances_
+importance_relative = importance / max(importance) * 100
+indices = np.argsort(importance_relative)
+
+plt.barh(range(len(indices)), importance_relative[indices], align='center')
+plt.xlabel('Relative Importance (%)')
+plt.ylabel('Feature Index')
+plt.show()
+
+
+
+features = transformed.columns
+top = 10
+
+plt.barh(range(len(indices[-top:])), importance_relative[indices[-top:]], align='center')
+plt.xlabel('Relative Importance (%)')
+plt.yticks(range(len(indices[-top:])), [features[i] for i in indices[-top:]])
+plt.show()
+
+
+x = x[:, indices[-6:]]
+x_train, x_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=seed)
+print(x.shape)
+
+
+
+classes = transformed.groupby('state').size().sort_values(ascending=True) 
+classes[0] / sum(classes)
+
+
+
+models = [('LR', LogisticRegression()), ('LDA', LinearDiscriminantAnalysis()),
+          ('KNN', KNeighborsClassifier()), ('DT', DecisionTreeClassifier()), ('NB', GaussianNB())]
+names = [n for n, m in models]
+ctrl = KFold(n_splits=10, random_state=seed)
+results = [cross_val_score(m, x_train, y_train, cv=ctrl) for n, m in models]
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+plt.boxplot(results)
+plt.title('Performance Comparison')
+plt.xlabel('Algorithm Abbreviation')
+plt.ylabel('Cross Validation Accuracy')
+ax.set_xticklabels(names)
+plt.show()
+
+
+pipelines = [('ScaledLR',  Pipeline([('Scaler', StandardScaler()), ('LR', LogisticRegression())])), 
+             ('ScaledLDA', Pipeline([('Scaler', StandardScaler()), ('LDA', LinearDiscriminantAnalysis())])), 
+             ('ScaledKNN', Pipeline([('Scaler', StandardScaler()), ('KNN', KNeighborsClassifier())])), 
+             ('ScaledDT',  Pipeline([('Scaler', StandardScaler()), ('DT', DecisionTreeClassifier())])),
+             ('ScaledNB',  Pipeline([('Scaler', StandardScaler()), ('NB', GaussianNB())]))]
+
+names = [n for n, p in pipelines]
+ctrl = KFold(n_splits=10, random_state=seed)
+results = [cross_val_score(p, x_train, y_train, cv=ctrl) for n, p in pipelines]
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+plt.boxplot(results)
+plt.title('Scaled Performance Comparison')
+plt.xlabel('Algorithm Abbreviation')
+plt.ylabel('Cross Validation Accuracy')
+ax.set_xticklabels(names)
+plt.show()
+
+
+ensembles = [('RF', RandomForestClassifier()), 
+             ('Ada', AdaBoostClassifier()), 
+             ('Grad', GradientBoostingClassifier())]
+names = [n for n, e in ensembles]
+results = [cross_val_score(e, x_train, y_train, cv=ctrl) for n, e in ensembles]
+
+
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+plt.boxplot(results)
+plt.title('Ensemble Comparison')
+plt.xlabel('Ensemble Abbreviation')
+plt.ylabel('Cross Validation Accuracy')
+ax.set_xticklabels(names)
+plt.show()
+
+
+print('Gradient Boosting accuracy: {:.4f}%'.format(results[2].mean() * 100))
+
+
+
+grad_scaled = Pipeline([('Scaler', StandardScaler()), ('Grad', GradientBoostingClassifier())])
+results = cross_val_score(grad_scaled, x_train, y_train, cv=ctrl)
+print('Scaled Gradient Boosting accuracy: {:.4f}%'.format(results.mean() * 100))
+
+
+param_grid = dict(n_estimators = np.arange(50, 500, 50))
+ctrl = KFold(n_splits=3, random_state=seed)
+grid = GridSearchCV(GradientBoostingClassifier(), param_grid, cv=ctrl)
+estimators_result = grid.fit(x_train, y_train)
+
+
+
+dump(estimators_result, open('kickstarter-n_estimators.pkl', 'wb'))
+
+
+plt.errorbar(x=np.arange(50, 500, 50), 
+             y=estimators_result.cv_results_['mean_test_score'], 
+             yerr=estimators_result.cv_results_['std_test_score'], 
+             capsize=4)
+plt.xlabel('Number of Estimators')
+plt.ylabel('Average Test Accuracy')
+plt.show()
+
+
+
+grid = GridSearchCV(GradientBoostingClassifier(), dict(max_depth=np.arange(1, 10, 1)), cv=ctrl)
+depth_result = grid.fit(x_train, y_train)
+
+
+dump(depth_result, open('kickstarter-max_depth.pkl', 'wb'))
+
+
+plt.errorbar(x=np.arange(1, 10, 1), 
+             y=depth_result.cv_results_['mean_test_score'], 
+             yerr=depth_result.cv_results_['std_test_score'], 
+             capsize=4)
+plt.xlabel('Max Estimator Depth')
+plt.ylabel('Average Test Accuracy')
+plt.show()
